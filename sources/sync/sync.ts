@@ -4,14 +4,30 @@ import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
-import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
+import { 
+    ApiEphemeralUpdate, 
+    ApiEphemeralUpdateSchema, 
+    ApiMessage, 
+    ApiUpdateContainer, 
+    ApiUpdateContainerSchema,
+    ApiUpdateNewMessage,
+    ApiUpdateSessionStateSchema,
+    ApiUpdateNewSessionSchema,
+    ApiDeleteSessionSchema,
+    ApiNewArtifactSchema,
+    ApiUpdateArtifactSchema,
+    ApiDeleteArtifactSchema,
+    ApiRelationshipUpdated,
+    ApiNewFeedPostSchema,
+    ApiKvBatchUpdate,
+    ApiKvBatchUpdateSchema
+} from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
 import * as Notifications from 'expo-notifications';
-import { registerPushToken } from './apiPush';
 import { Platform, AppState } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
@@ -19,12 +35,12 @@ import { applySettings, Settings, settingsDefaults, settingsParse } from './sett
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import { initializeTracking, tracking } from '@/track';
-import { parseToken } from '@/utils/parseToken';
-import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
-import { trackPaywallPresented, trackPaywallPurchased, trackPaywallCancelled, trackPaywallRestored, trackPaywallError } from '@/track';
-import { getServerUrl } from './serverConfig';
-import { config } from '@/config';
 import { log } from '@/log';
+import { getServerUrl } from './serverConfig';
+import { parseToken } from '@/utils/parseToken';
+import { initializeTodoSync } from '../-zen/model/ops';
+import { z } from 'zod';
+import { config } from '@/config';
 import { gitStatusSync } from './gitStatusSync';
 import { projectManager } from './projectManager';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
@@ -38,9 +54,8 @@ import { getFriendsList, getUserProfile } from './apiFriends';
 import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
-import { initializeTodoSync } from '../-zen/model/ops';
 
-class Sync {
+export class Sync {
     // Spawned agents (especially in spawn mode) can take noticeable time to connect.
     private static readonly SESSION_READY_TIMEOUT_MS = 10000;
 
@@ -57,18 +72,16 @@ class Sync {
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
-    private purchasesSync: InvalidateSync;
     private machinesSync: InvalidateSync;
-    private pushTokenSync: InvalidateSync;
     private nativeUpdateSync: InvalidateSync;
     private artifactsSync: InvalidateSync;
     private friendsSync: InvalidateSync;
     private friendRequestsSync: InvalidateSync;
     private feedSync: InvalidateSync;
     private todosSync: InvalidateSync;
+    private purchasesSync: InvalidateSync;
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
-    revenueCatInitialized = false;
 
     // Generic locking mechanism
     private recalculationLockCount = 0;
@@ -78,7 +91,6 @@ class Sync {
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
-        this.purchasesSync = new InvalidateSync(this.syncPurchases);
         this.machinesSync = new InvalidateSync(this.fetchMachines);
         this.nativeUpdateSync = new InvalidateSync(this.fetchNativeUpdate);
         this.artifactsSync = new InvalidateSync(this.fetchArtifactsList);
@@ -86,24 +98,15 @@ class Sync {
         this.friendRequestsSync = new InvalidateSync(this.fetchFriendRequests);
         this.feedSync = new InvalidateSync(this.fetchFeed);
         this.todosSync = new InvalidateSync(this.fetchTodos);
-
-        const registerPushToken = async () => {
-            if (__DEV__) {
-                return;
-            }
-            await this.registerPushToken();
-        }
-        this.pushTokenSync = new InvalidateSync(registerPushToken);
+        this.purchasesSync = new InvalidateSync(this.fetchPurchases);
         this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 2000);
 
-        // Listen for app state changes to refresh purchases
+        // Listen for app state changes to refresh data
         AppState.addEventListener('change', (nextAppState) => {
             if (nextAppState === 'active') {
                 log.log('📱 App became active');
-                this.purchasesSync.invalidate();
                 this.profileSync.invalidate();
                 this.machinesSync.invalidate();
-                this.pushTokenSync.invalidate();
                 this.sessionsSync.invalidate();
                 this.nativeUpdateSync.invalidate();
                 log.log('📱 App became active: Invalidating artifacts sync');
@@ -142,9 +145,6 @@ class Sync {
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
         await this.#init();
-
-        // Await purchases sync so RevenueCat is initialized for paywall
-        await this.purchasesSync.awaitQueue();
     }
 
     async #init() {
@@ -167,9 +167,7 @@ class Sync {
         this.sessionsSync.invalidate();
         this.settingsSync.invalidate();
         this.profileSync.invalidate();
-        this.purchasesSync.invalidate();
         this.machinesSync.invalidate();
-        this.pushTokenSync.invalidate();
         this.nativeUpdateSync.invalidate();
         this.friendsSync.invalidate();
         this.friendRequestsSync.invalidate();
@@ -275,7 +273,7 @@ class Sync {
         const createdAt = Date.now();
         const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
         if (normalizedMessage) {
-            this.applyMessages(sessionId, [normalizedMessage]);
+            storage.getState().applyMessages(sessionId, [normalizedMessage]);
         }
 
         const ready = await this.waitForAgentReady(sessionId);
@@ -314,152 +312,9 @@ class Sync {
         this.settingsSync.invalidate();
     }
 
-    refreshPurchases = () => {
-        this.purchasesSync.invalidate();
-    }
-
     refreshProfile = async () => {
         await this.profileSync.invalidateAndAwait();
     }
-
-    purchaseProduct = async (productId: string): Promise<{ success: boolean; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                return { success: false, error: 'RevenueCat not initialized' };
-            }
-
-            // Fetch the product
-            const products = await RevenueCat.getProducts([productId]);
-            if (products.length === 0) {
-                return { success: false, error: `Product '${productId}' not found` };
-            }
-
-            // Purchase the product
-            const product = products[0];
-            const { customerInfo } = await RevenueCat.purchaseStoreProduct(product);
-
-            // Update local purchases data
-            storage.getState().applyPurchases(customerInfo);
-
-            return { success: true };
-        } catch (error: any) {
-            // Check if user cancelled
-            if (error.userCancelled) {
-                return { success: false, error: 'Purchase cancelled' };
-            }
-
-            // Return the error message
-            return { success: false, error: error.message || 'Purchase failed' };
-        }
-    }
-
-    getOfferings = async (): Promise<{ success: boolean; offerings?: any; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                return { success: false, error: 'RevenueCat not initialized' };
-            }
-
-            // Fetch offerings
-            const offerings = await RevenueCat.getOfferings();
-
-            // Return the offerings data
-            return {
-                success: true,
-                offerings: {
-                    current: offerings.current,
-                    all: offerings.all
-                }
-            };
-        } catch (error: any) {
-            return { success: false, error: error.message || 'Failed to fetch offerings' };
-        }
-    }
-
-    presentPaywall = async (): Promise<{ success: boolean; purchased?: boolean; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                const error = 'RevenueCat not initialized';
-                trackPaywallError(error);
-                return { success: false, error };
-            }
-
-            // Track paywall presentation
-            trackPaywallPresented();
-
-            // Present the paywall
-            const result = await RevenueCat.presentPaywall();
-
-            // Handle the result
-            switch (result) {
-                case PaywallResult.PURCHASED:
-                    trackPaywallPurchased();
-                    // Refresh customer info after purchase
-                    await this.syncPurchases();
-                    return { success: true, purchased: true };
-                case PaywallResult.RESTORED:
-                    trackPaywallRestored();
-                    // Refresh customer info after restore
-                    await this.syncPurchases();
-                    return { success: true, purchased: true };
-                case PaywallResult.CANCELLED:
-                    trackPaywallCancelled();
-                    return { success: true, purchased: false };
-                case PaywallResult.NOT_PRESENTED:
-                    // Don't track error for NOT_PRESENTED as it's a platform limitation
-                    return { success: false, error: 'Paywall not available on this platform' };
-                case PaywallResult.ERROR:
-                default:
-                    const errorMsg = 'Failed to present paywall';
-                    trackPaywallError(errorMsg);
-                    return { success: false, error: errorMsg };
-            }
-        } catch (error: any) {
-            const errorMessage = error.message || 'Failed to present paywall';
-            trackPaywallError(errorMessage);
-            return { success: false, error: errorMessage };
-        }
-    }
-
-    async assumeUsers(userIds: string[]): Promise<void> {
-        if (!this.credentials || userIds.length === 0) return;
-        
-        const state = storage.getState();
-        // Filter out users we already have in cache (including null for 404s)
-        const missingIds = userIds.filter(id => !(id in state.users));
-        
-        if (missingIds.length === 0) return;
-        
-        log.log(`👤 Fetching ${missingIds.length} missing users...`);
-        
-        // Fetch missing users in parallel
-        const results = await Promise.all(
-            missingIds.map(async (id) => {
-                try {
-                    const profile = await getUserProfile(this.credentials!, id);
-                    return { id, profile };  // profile is null if 404
-                } catch (error) {
-                    console.error(`Failed to fetch user ${id}:`, error);
-                    return { id, profile: null };  // Treat errors as 404
-                }
-            })
-        );
-        
-        // Convert to Record<string, UserProfile | null>
-        const usersMap: Record<string, UserProfile | null> = {};
-        results.forEach(({ id, profile }) => {
-            usersMap[id] = profile;
-        });
-        
-        storage.getState().applyUsers(usersMap);
-        log.log(`👤 Applied ${results.length} users to cache (${results.filter(r => r.profile).length} found, ${results.filter(r => !r.profile).length} not found)`);
-    }
-
-    //
-    // Private
-    //
 
     private fetchSessions = async () => {
         if (!this.credentials) return;
@@ -537,9 +392,36 @@ class Sync {
         }
 
         // Apply to storage
-        this.applySessions(decryptedSessions);
+        storage.getState().applySessions(decryptedSessions);
         log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
+    }
 
+    async assumeUsers(userIds: string[]): Promise<void> {
+        if (!this.credentials) return;
+
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/users`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ userIds })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch users: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const users = data.users as UserProfile[];
+
+        const usersMap: Record<string, UserProfile | null> = {};
+        for (const user of users) {
+            usersMap[user.id] = user;
+        }
+
+        storage.getState().applyUsers(usersMap);
     }
 
     public refreshMachines = async () => {
@@ -1330,57 +1212,6 @@ class Sync {
         }
     }
 
-    private syncPurchases = async () => {
-        try {
-            // Initialize RevenueCat if not already done
-            if (!this.revenueCatInitialized) {
-                // Get the appropriate API key based on platform
-                let apiKey: string | undefined;
-
-                if (Platform.OS === 'ios') {
-                    apiKey = config.revenueCatAppleKey;
-                } else if (Platform.OS === 'android') {
-                    apiKey = config.revenueCatGoogleKey;
-                } else if (Platform.OS === 'web') {
-                    apiKey = config.revenueCatStripeKey;
-                }
-
-                if (!apiKey) {
-                    console.log(`RevenueCat: No API key found for platform ${Platform.OS}`);
-                    return;
-                }
-
-                // Configure RevenueCat
-                if (__DEV__) {
-                    RevenueCat.setLogLevel(LogLevel.DEBUG);
-                }
-
-                // Initialize with the public ID as user ID
-                RevenueCat.configure({
-                    apiKey,
-                    appUserID: this.serverID, // In server this is a CUID, which we can assume is globaly unique even between servers
-                    useAmazon: false,
-                });
-
-                this.revenueCatInitialized = true;
-                console.log('RevenueCat initialized successfully');
-            }
-
-            // Sync purchases
-            await RevenueCat.syncPurchases();
-
-            // Fetch customer info
-            const customerInfo = await RevenueCat.getCustomerInfo();
-
-            // Apply to storage (storage handles the transformation)
-            storage.getState().applyPurchases(customerInfo);
-
-        } catch (error) {
-            console.error('Failed to sync purchases:', error);
-            // Don't throw - purchases are optional
-        }
-    }
-
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
 
@@ -1435,652 +1266,245 @@ class Sync {
         // console.log('messages', JSON.stringify(normalizedMessages));
 
         // Apply to storage
-        this.applyMessages(sessionId, normalizedMessages);
+        storage.getState().applyMessages(sessionId, normalizedMessages);
         log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${normalizedMessages.length} messages`);
     }
 
-    private registerPushToken = async () => {
-        log.log('registerPushToken');
-        // Only register on mobile platforms
-        if (Platform.OS === 'web') {
-            return;
+    private fetchPurchases = async () => {
+        if (!this.credentials) return;
+
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/account/purchases`, {
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch purchases: ${response.status}`);
         }
 
-        // Request permission
-        const { status: existingStatus } = await Notifications.getPermissionsAsync();
-        let finalStatus = existingStatus;
-        log.log('existingStatus: ' + JSON.stringify(existingStatus));
+        const data = await response.json();
+        // Purchases data will be stored when needed
+    }
 
-        if (existingStatus !== 'granted') {
-            const { status } = await Notifications.requestPermissionsAsync();
-            finalStatus = status;
-        }
-        log.log('finalStatus: ' + JSON.stringify(finalStatus));
+    private flushActivityUpdates = async (updates: Map<string, ApiEphemeralActivityUpdate>) => {
+        if (!this.credentials || updates.size === 0) return;
 
-        if (finalStatus !== 'granted') {
-            console.log('Failed to get push token for push notification!');
-            return;
-        }
+        const API_ENDPOINT = getServerUrl();
+        const response = await fetch(`${API_ENDPOINT}/v1/sessions/activity`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.credentials.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ updates: Array.from(updates.values()) })
+        });
 
-        // Get push token
-        const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
-
-        const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
-        log.log('tokenData: ' + JSON.stringify(tokenData));
-
-        // Register with server
-        try {
-            await registerPushToken(this.credentials, tokenData.data);
-            log.log('Push token registered successfully');
-        } catch (error) {
-            log.log('Failed to register push token: ' + JSON.stringify(error));
+        if (!response.ok) {
+            throw new Error(`Failed to flush activity updates: ${response.status}`);
         }
     }
 
     private subscribeToUpdates = () => {
-        // Subscribe to message updates
-        apiSocket.onMessage('update', this.handleUpdate.bind(this));
-        apiSocket.onMessage('ephemeral', this.handleEphemeralUpdate.bind(this));
+        apiSocket.onMessage('update', async (container: ApiUpdateContainer) => {
+            try {
+                await this.handleUpdate(container);
+            } catch (error) {
+                console.error('Failed to handle update:', error);
+            }
+        });
 
-        // Subscribe to connection state changes
-        apiSocket.onReconnected(() => {
-            log.log('🔌 Socket reconnected');
-            this.sessionsSync.invalidate();
-            this.machinesSync.invalidate();
-            log.log('🔌 Socket reconnected: Invalidating artifacts sync');
-            this.artifactsSync.invalidate();
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
-            const sessionsData = storage.getState().sessionsData;
-            if (sessionsData) {
-                for (const item of sessionsData) {
-                    if (typeof item !== 'string') {
-                        this.messagesSync.get(item.id)?.invalidate();
-                        // Also invalidate git status on reconnection
-                        gitStatusSync.invalidate(item.id);
-                    }
-                }
+        apiSocket.onMessage('ephemeral_update', async (update: ApiEphemeralUpdate) => {
+            try {
+                await this.handleEphemeralUpdate(update);
+            } catch (error) {
+                console.error('Failed to handle ephemeral update:', error);
             }
         });
     }
 
-    private handleUpdate = async (update: unknown) => {
-        console.log('🔄 Sync: handleUpdate called with:', JSON.stringify(update).substring(0, 300));
-        const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
-        if (!validatedUpdate.success) {
-            console.log('❌ Sync: Invalid update received:', validatedUpdate.error);
-            console.error('❌ Sync: Invalid update data:', update);
-            return;
-        }
-        const updateData = validatedUpdate.data;
-        console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
+    private async handleUpdate(container: ApiUpdateContainer) {
+        const update = container.body;
 
-        if (updateData.body.t === 'new-message') {
-
-            // Get encryption
-            const encryption = this.encryption.getSessionEncryption(updateData.body.sid);
-            if (!encryption) { // Should never happen
-                console.error(`Session ${updateData.body.sid} not found`);
-                this.fetchSessions(); // Just fetch sessions again
-                return;
-            }
-
-            // Decrypt message
-            let lastMessage: NormalizedMessage | null = null;
-            if (updateData.body.message) {
-                const decrypted = await encryption.decryptMessage(updateData.body.message);
-                if (decrypted) {
-                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-
-                    // Update session
-                    const session = storage.getState().sessions[updateData.body.sid];
-                    if (session) {
-                        this.applySessions([{
-                            ...session,
-                            updatedAt: updateData.createdAt,
-                            seq: updateData.seq
-                        }])
-                    } else {
-                        // Fetch sessions again if we don't have this session
-                        this.fetchSessions();
-                    }
-
-                    // Update messages
-                    if (lastMessage) {
-                        console.log('🔄 Sync: Applying message:', JSON.stringify(lastMessage));
-                        this.applyMessages(updateData.body.sid, [lastMessage]);
-                        let hasMutableTool = false;
-                        if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
-                            hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
-                        }
-                        if (hasMutableTool) {
-                            gitStatusSync.invalidate(updateData.body.sid);
-                        }
-                    }
-                }
-            }
-
-            // Ping session
-            this.onSessionVisible(updateData.body.sid);
-
-        } else if (updateData.body.t === 'new-session') {
-            log.log('🆕 New session update received');
-            this.sessionsSync.invalidate();
-        } else if (updateData.body.t === 'delete-session') {
-            log.log('🗑️ Delete session update received');
-            const sessionId = updateData.body.sid;
-
-            // Remove session from storage
-            storage.getState().deleteSession(sessionId);
-
-            // Remove encryption keys from memory
-            this.encryption.removeSessionEncryption(sessionId);
-
-            // Remove from project manager
-            projectManager.removeSession(sessionId);
-
-            // Clear any cached git status
-            gitStatusSync.clearForSession(sessionId);
-
-            log.log(`🗑️ Session ${sessionId} deleted from local storage`);
-        } else if (updateData.body.t === 'update-session') {
-            const session = storage.getState().sessions[updateData.body.id];
-            if (session) {
-                // Get session encryption
-                const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
-                if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} - this should never happen`);
-                    return;
-                }
-
-                const agentState = updateData.body.agentState && sessionEncryption
-                    ? await sessionEncryption.decryptAgentState(updateData.body.agentState.version, updateData.body.agentState.value)
-                    : session.agentState;
-                const metadata = updateData.body.metadata && sessionEncryption
-                    ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
-                    : session.metadata;
-
-                this.applySessions([{
-                    ...session,
-                    agentState,
-                    agentStateVersion: updateData.body.agentState
-                        ? updateData.body.agentState.version
-                        : session.agentStateVersion,
-                    metadata,
-                    metadataVersion: updateData.body.metadata
-                        ? updateData.body.metadata.version
-                        : session.metadataVersion,
-                    updatedAt: updateData.createdAt,
-                    seq: updateData.seq
-                }]);
-
-                // Invalidate git status when agent state changes (files may have been modified)
-                if (updateData.body.agentState) {
-                    gitStatusSync.invalidate(updateData.body.id);
-
-                    // Check for new permission requests and notify voice assistant
-                    if (agentState?.requests && Object.keys(agentState.requests).length > 0) {
-                        const requestIds = Object.keys(agentState.requests);
-                        const firstRequest = agentState.requests[requestIds[0]];
-                        const toolName = firstRequest?.tool;
-                        voiceHooks.onPermissionRequested(updateData.body.id, requestIds[0], toolName, firstRequest?.arguments);
-                    }
-
-                    // Re-fetch messages when control returns to mobile (local -> remote mode switch)
-                    // This catches up on any messages that were exchanged while desktop had control
-                    const wasControlledByUser = session.agentState?.controlledByUser;
-                    const isNowControlledByUser = agentState?.controlledByUser;
-                    if (!wasControlledByUser && isNowControlledByUser) {
-                        log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
-                    }
-                }
-            }
-        } else if (updateData.body.t === 'update-account') {
-            const accountUpdate = updateData.body;
-            const currentProfile = storage.getState().profile;
-
-            // Build updated profile with new data
-            const updatedProfile: Profile = {
-                ...currentProfile,
-                firstName: accountUpdate.firstName !== undefined ? accountUpdate.firstName : currentProfile.firstName,
-                lastName: accountUpdate.lastName !== undefined ? accountUpdate.lastName : currentProfile.lastName,
-                avatar: accountUpdate.avatar !== undefined ? accountUpdate.avatar : currentProfile.avatar,
-                github: accountUpdate.github !== undefined ? accountUpdate.github : currentProfile.github,
-                timestamp: updateData.createdAt // Update timestamp to latest
-            };
-
-            // Apply the updated profile to storage
-            storage.getState().applyProfile(updatedProfile);
-        } else if (updateData.body.t === 'update-machine') {
-            const machineUpdate = updateData.body;
-            const machineId = machineUpdate.machineId;  // Changed from .id to .machineId
-            const machine = storage.getState().machines[machineId];
-
-            // Create or update machine with all required fields
-            const updatedMachine: Machine = {
-                id: machineId,
-                seq: updateData.seq,
-                createdAt: machine?.createdAt ?? updateData.createdAt,
-                updatedAt: updateData.createdAt,
-                active: machineUpdate.active ?? true,
-                activeAt: machineUpdate.activeAt ?? updateData.createdAt,
-                metadata: machine?.metadata ?? null,
-                metadataVersion: machine?.metadataVersion ?? 0,
-                daemonState: machine?.daemonState ?? null,
-                daemonStateVersion: machine?.daemonStateVersion ?? 0
-            };
-
-            // Get machine-specific encryption (might not exist if machine wasn't initialized)
-            const machineEncryption = this.encryption.getMachineEncryption(machineId);
-            if (!machineEncryption) {
-                console.error(`Machine encryption not found for ${machineId} - cannot decrypt updates`);
-                return;
-            }
-
-            // If metadata is provided, decrypt and update it
-            const metadataUpdate = machineUpdate.metadata;
-            if (metadataUpdate) {
-                try {
-                    const metadata = await machineEncryption.decryptMetadata(metadataUpdate.version, metadataUpdate.value);
-                    updatedMachine.metadata = metadata;
-                    updatedMachine.metadataVersion = metadataUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine metadata for ${machineId}:`, error);
-                }
-            }
-
-            // If daemonState is provided, decrypt and update it
-            const daemonStateUpdate = machineUpdate.daemonState;
-            if (daemonStateUpdate) {
-                try {
-                    const daemonState = await machineEncryption.decryptDaemonState(daemonStateUpdate.version, daemonStateUpdate.value);
-                    updatedMachine.daemonState = daemonState;
-                    updatedMachine.daemonStateVersion = daemonStateUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine daemonState for ${machineId}:`, error);
-                }
-            }
-
-            // Update storage using applyMachines which rebuilds sessionListViewData
-            storage.getState().applyMachines([updatedMachine]);
-        } else if (updateData.body.t === 'relationship-updated') {
-            log.log('👥 Received relationship-updated update');
-            const relationshipUpdate = updateData.body;
-            
-            // Apply the relationship update to storage
-            storage.getState().applyRelationshipUpdate({
-                fromUserId: relationshipUpdate.fromUserId,
-                toUserId: relationshipUpdate.toUserId,
-                status: relationshipUpdate.status,
-                action: relationshipUpdate.action,
-                fromUser: relationshipUpdate.fromUser,
-                toUser: relationshipUpdate.toUser,
-                timestamp: relationshipUpdate.timestamp
-            });
-            
-            // Invalidate friends data to refresh with latest changes
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
-        } else if (updateData.body.t === 'new-artifact') {
-            log.log('📦 Received new-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            try {
-                // Decrypt the data encryption key
-                const decryptedKey = await this.encryption.decryptEncryptionKey(artifactUpdate.dataEncryptionKey);
-                if (!decryptedKey) {
-                    console.error(`Failed to decrypt key for new artifact ${artifactId}`);
-                    return;
-                }
-                
-                // Store the decrypted key in memory
-                this.artifactDataKeys.set(artifactId, decryptedKey);
-                
-                // Create artifact encryption instance
-                const artifactEncryption = new ArtifactEncryption(decryptedKey);
-                
-                // Decrypt header
-                const header = await artifactEncryption.decryptHeader(artifactUpdate.header);
-                
-                // Decrypt body if provided
-                let decryptedBody: string | null | undefined = undefined;
-                if (artifactUpdate.body && artifactUpdate.bodyVersion !== undefined) {
-                    const body = await artifactEncryption.decryptBody(artifactUpdate.body);
-                    decryptedBody = body?.body || null;
-                }
-                
-                // Add to storage
-                const decryptedArtifact: DecryptedArtifact = {
-                    id: artifactId,
-                    title: header?.title || null,
-                    body: decryptedBody,
-                    headerVersion: artifactUpdate.headerVersion,
-                    bodyVersion: artifactUpdate.bodyVersion,
-                    seq: artifactUpdate.seq,
-                    createdAt: artifactUpdate.createdAt,
-                    updatedAt: artifactUpdate.updatedAt,
-                    isDecrypted: !!header,
-                };
-                
-                storage.getState().addArtifact(decryptedArtifact);
-                log.log(`📦 Added new artifact ${artifactId} to storage`);
-            } catch (error) {
-                console.error(`Failed to process new artifact ${artifactId}:`, error);
-            }
-        } else if (updateData.body.t === 'update-artifact') {
-            log.log('📦 Received update-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            // Get existing artifact
-            const existingArtifact = storage.getState().artifacts[artifactId];
-            if (!existingArtifact) {
-                console.error(`Artifact ${artifactId} not found in storage`);
-                // Fetch all artifacts to sync
-                this.artifactsSync.invalidate();
-                return;
-            }
-            
-            try {
-                // Get the data encryption key from memory
-                let dataEncryptionKey = this.artifactDataKeys.get(artifactId);
-                if (!dataEncryptionKey) {
-                    console.error(`Encryption key not found for artifact ${artifactId}, fetching artifacts`);
-                    this.artifactsSync.invalidate();
-                    return;
-                }
-                
-                // Create artifact encryption instance
-                const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
-                
-                // Update artifact with new data  
-                const updatedArtifact: DecryptedArtifact = {
-                    ...existingArtifact,
-                    seq: updateData.seq,
-                    updatedAt: updateData.createdAt,
-                };
-                
-                // Decrypt and update header if provided
-                if (artifactUpdate.header) {
-                    const header = await artifactEncryption.decryptHeader(artifactUpdate.header.value);
-                    updatedArtifact.title = header?.title || null;
-                    updatedArtifact.sessions = header?.sessions;
-                    updatedArtifact.draft = header?.draft;
-                    updatedArtifact.headerVersion = artifactUpdate.header.version;
-                }
-                
-                // Decrypt and update body if provided
-                if (artifactUpdate.body) {
-                    const body = await artifactEncryption.decryptBody(artifactUpdate.body.value);
-                    updatedArtifact.body = body?.body || null;
-                    updatedArtifact.bodyVersion = artifactUpdate.body.version;
-                }
-                
-                storage.getState().updateArtifact(updatedArtifact);
-                log.log(`📦 Updated artifact ${artifactId} in storage`);
-            } catch (error) {
-                console.error(`Failed to process artifact update ${artifactId}:`, error);
-            }
-        } else if (updateData.body.t === 'delete-artifact') {
-            log.log('📦 Received delete-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            // Remove from storage
-            storage.getState().deleteArtifact(artifactId);
-            
-            // Remove encryption key from memory
-            this.artifactDataKeys.delete(artifactId);
-        } else if (updateData.body.t === 'new-feed-post') {
-            log.log('📰 Received new-feed-post update');
-            const feedUpdate = updateData.body;
-            
-            // Convert to FeedItem with counter from cursor
-            const feedItem: FeedItem = {
-                id: feedUpdate.id,
-                body: feedUpdate.body,
-                cursor: feedUpdate.cursor,
-                createdAt: feedUpdate.createdAt,
-                repeatKey: feedUpdate.repeatKey,
-                counter: parseInt(feedUpdate.cursor.substring(2), 10)
-            };
-            
-            // Check if we need to fetch user for friend-related items
-            if (feedItem.body && (feedItem.body.kind === 'friend_request' || feedItem.body.kind === 'friend_accepted')) {
-                await this.assumeUsers([feedItem.body.uid]);
-                
-                // Check if user fetch failed (404) - don't store item if user not found
-                const users = storage.getState().users;
-                const userProfile = users[feedItem.body.uid];
-                if (userProfile === null || userProfile === undefined) {
-                    // User was not found or 404, don't store this item
-                    log.log(`📰 Skipping feed item ${feedItem.id} - user ${feedItem.body.uid} not found`);
-                    return;
-                }
-            }
-            
-            // Apply to storage (will handle repeatKey replacement)
-            storage.getState().applyFeedItems([feedItem]);
-        } else if (updateData.body.t === 'kv-batch-update') {
-            log.log('📝 Received kv-batch-update');
-            const kvUpdate = updateData.body;
-
-            // Process KV changes for todos
-            if (kvUpdate.changes && Array.isArray(kvUpdate.changes)) {
-                const todoChanges = kvUpdate.changes.filter(change =>
-                    change.key && change.key.startsWith('todo.')
-                );
-
-                if (todoChanges.length > 0) {
-                    log.log(`📝 Processing ${todoChanges.length} todo KV changes from socket`);
-
-                    // Apply the changes directly to avoid unnecessary refetch
-                    try {
-                        await this.applyTodoSocketUpdates(todoChanges);
-                    } catch (error) {
-                        console.error('Failed to apply todo socket updates:', error);
-                        // Fallback to refetch on error
-                        this.todosSync.invalidate();
-                    }
-                }
-            }
+        switch (update.t) {
+            case 'new-message':
+                await this.handleNewMessage(update);
+                break;
+            case 'update-session':
+                await this.handleSessionUpdate(update);
+                break;
+            case 'new-session':
+                await this.handleNewSession(update);
+                break;
+            case 'delete-session':
+                await this.handleDeleteSession(update);
+                break;
+            case 'new-artifact':
+                await this.handleNewArtifact(update);
+                break;
+            case 'update-artifact':
+                await this.handleUpdateArtifact(update);
+                break;
+            case 'delete-artifact':
+                await this.handleDeleteArtifact(update);
+                break;
+            case 'relationship-updated':
+                await this.handleRelationshipUpdated(update);
+                break;
+            case 'new-feed-post':
+                await this.handleNewFeedPost(update);
+                break;
+            case 'kv-batch-update':
+                await this.handleKvBatchUpdate(update);
+                break;
+            default:
+                console.warn('Unknown update type:', update);
         }
     }
 
-    private flushActivityUpdates = (updates: Map<string, ApiEphemeralActivityUpdate>) => {
-        // log.log(`🔄 Flushing activity updates for ${updates.size} sessions - acquiring lock`);
+    private async handleNewMessage(update: ApiUpdateNewMessage) {
+        const encryption = this.encryption.getSessionEncryption(update.sid);
+        if (!encryption) return;
 
+        const decryptedRaw = await encryption.decryptRaw(update.message.content.c);
+        if (!decryptedRaw) return;
 
-        const sessions: Session[] = [];
+        const normalized = normalizeRawMessage(update.message.id, update.message.localId ?? null, update.message.createdAt, decryptedRaw);
+        if (normalized) {
+            storage.getState().applyMessages(update.sid, [normalized]);
+        }
+    }
 
-        for (const [sessionId, update] of updates) {
+    private async handleSessionUpdate(update: z.infer<typeof ApiUpdateSessionStateSchema>) {
+        const encryption = this.encryption.getSessionEncryption(update.id);
+        if (!encryption) return;
+
+        const session = storage.getState().sessions[update.id];
+        if (!session) return;
+
+        let metadata = session.metadata;
+        let agentState = session.agentState;
+
+        if (update.metadata) {
+            metadata = await encryption.decryptMetadata(update.metadata.version, update.metadata.value);
+        }
+
+        if (update.agentState) {
+            agentState = await encryption.decryptAgentState(update.agentState.version, update.agentState.value);
+        }
+
+        const updatedSession = {
+            ...session,
+            metadata,
+            agentState
+        };
+
+        storage.getState().applySessions([updatedSession]);
+    }
+
+    private async handleNewSession(update: z.infer<typeof ApiUpdateNewSessionSchema>) {
+        await this.sessionsSync.invalidate();
+    }
+
+    private async handleDeleteSession(update: z.infer<typeof ApiDeleteSessionSchema>) {
+        const sessions = storage.getState().sessions;
+        const { [update.sid]: deleted, ...remaining } = sessions;
+        storage.getState().applySessions(Object.values(remaining));
+    }
+
+    private async handleNewArtifact(update: z.infer<typeof ApiNewArtifactSchema>) {
+        const artifact = await this.fetchArtifactWithBody(update.artifactId);
+        if (artifact) {
+            storage.getState().applyArtifacts([artifact]);
+        }
+    }
+
+    private async handleUpdateArtifact(update: z.infer<typeof ApiUpdateArtifactSchema>) {
+        const artifact = await this.fetchArtifactWithBody(update.artifactId);
+        if (artifact) {
+            storage.getState().applyArtifacts([artifact]);
+        }
+    }
+
+    private async handleDeleteArtifact(update: z.infer<typeof ApiDeleteArtifactSchema>) {
+        const artifacts = storage.getState().artifacts;
+        const { [update.artifactId]: deleted, ...remaining } = artifacts;
+        storage.getState().applyArtifacts(Object.values(remaining));
+    }
+
+    private async handleRelationshipUpdated(update: ApiRelationshipUpdated) {
+        storage.getState().applyRelationshipUpdate(update);
+    }
+
+    private async handleNewFeedPost(update: z.infer<typeof ApiNewFeedPostSchema>) {
+        const feedItem: FeedItem = {
+            ...update,
+            counter: 0
+        };
+        storage.getState().applyFeedItems([feedItem]);
+    }
+
+    private async handleKvBatchUpdate(update: z.infer<typeof ApiKvBatchUpdateSchema>) {
+        // Handle KV batch updates if needed
+    }
+
+    private async handleEphemeralUpdate(update: ApiEphemeralUpdate) {
+        const { type, id } = update;
+
+        switch (type) {
+            case 'activity':
+                const session = storage.getState().sessions[id];
+                if (session) {
+                    const activityUpdate = update as ApiEphemeralActivityUpdate;
+                    const updatedSession = {
+                        ...session,
+                        thinking: activityUpdate.thinking,
+                        thinkingAt: activityUpdate.thinking ? Date.now() : session.thinkingAt
+                    };
+                    storage.getState().applySessions([updatedSession]);
+                }
+                break;
+            case 'usage':
+                // Handle usage updates if needed
+                break;
+            case 'machine-activity':
+                // Handle machine activity updates if needed
+                break;
+            default:
+                console.warn('Unknown ephemeral update type:', type);
+        }
+    }
+
+    private waitForAgentReady = async (sessionId: string): Promise<boolean> => {
+        const timeout = Sync.SESSION_READY_TIMEOUT_MS;
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < timeout) {
             const session = storage.getState().sessions[sessionId];
-            if (session) {
-                sessions.push({
-                    ...session,
-                    active: update.active,
-                    activeAt: update.activeAt,
-                    thinking: update.thinking ?? false,
-                    thinkingAt: update.activeAt // Always use activeAt for consistency
-                });
+            if (session && session.agentState) {
+                return true;
             }
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
 
-        if (sessions.length > 0) {
-            // console.log('flushing activity updates ' + sessions.length);
-            this.applySessions(sessions);
-            // log.log(`🔄 Activity updates flushed - updated ${sessions.length} sessions`);
-        }
-    }
-
-    private handleEphemeralUpdate = (update: unknown) => {
-        const validatedUpdate = ApiEphemeralUpdateSchema.safeParse(update);
-        if (!validatedUpdate.success) {
-            console.log('Invalid ephemeral update received:', validatedUpdate.error);
-            console.error('Invalid ephemeral update received:', update);
-            return;
-        } else {
-            // console.log('Ephemeral update received:', update);
-        }
-        const updateData = validatedUpdate.data;
-
-        // Process activity updates through smart debounce accumulator
-        if (updateData.type === 'activity') {
-            // console.log('adding activity update ' + updateData.id);
-            this.activityAccumulator.addUpdate(updateData);
-        }
-
-        // Handle machine activity updates
-        if (updateData.type === 'machine-activity') {
-            // Update machine's active status and lastActiveAt
-            const machine = storage.getState().machines[updateData.id];
-            if (machine) {
-                const updatedMachine: Machine = {
-                    ...machine,
-                    active: updateData.active,
-                    activeAt: updateData.activeAt
-                };
-                storage.getState().applyMachines([updatedMachine]);
-            }
-        }
-
-        // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
-    }
-
-    //
-    // Apply store
-    //
-
-    private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
-        const result = storage.getState().applyMessages(sessionId, messages);
-        let m: Message[] = [];
-        for (let messageId of result.changed) {
-            const message = storage.getState().sessionMessages[sessionId].messagesMap[messageId];
-            if (message) {
-                m.push(message);
-            }
-        }
-        if (m.length > 0) {
-            voiceHooks.onMessages(sessionId, m);
-        }
-        if (result.hasReadyEvent) {
-            voiceHooks.onReady(sessionId);
-        }
-    }
-
-    private applySessions = (sessions: (Omit<Session, "presence"> & {
-        presence?: "online" | number;
-    })[]) => {
-        const active = storage.getState().getActiveSessions();
-        storage.getState().applySessions(sessions);
-        const newActive = storage.getState().getActiveSessions();
-        this.applySessionDiff(active, newActive);
-    }
-
-    private applySessionDiff = (active: Session[], newActive: Session[]) => {
-        let wasActive = new Set(active.map(s => s.id));
-        let isActive = new Set(newActive.map(s => s.id));
-        for (let s of active) {
-            if (!isActive.has(s.id)) {
-                voiceHooks.onSessionOffline(s.id, s.metadata ?? undefined);
-            }
-        }
-        for (let s of newActive) {
-            if (!wasActive.has(s.id)) {
-                voiceHooks.onSessionOnline(s.id, s.metadata ?? undefined);
-            }
-        }
-    }
-
-    /**
-     * Waits for the CLI agent to be ready by watching agentStateVersion.
-     *
-     * When a session is created, agentStateVersion starts at 0. Once the CLI
-     * connects and sends its first state update (via updateAgentState()), the
-     * version becomes > 0. This serves as a reliable signal that the CLI's
-     * WebSocket is connected and ready to receive messages.
-     */
-    private waitForAgentReady(sessionId: string, timeoutMs: number = Sync.SESSION_READY_TIMEOUT_MS): Promise<boolean> {
-        const startedAt = Date.now();
-
-        return new Promise((resolve) => {
-            const done = (ready: boolean, reason: string) => {
-                clearTimeout(timeout);
-                unsubscribe();
-                const duration = Date.now() - startedAt;
-                log.log(`Session ${sessionId} ${reason} after ${duration}ms`);
-                resolve(ready);
-            };
-
-            const check = () => {
-                const s = storage.getState().sessions[sessionId];
-                if (s && s.agentStateVersion > 0) {
-                    done(true, `ready (agentStateVersion=${s.agentStateVersion})`);
-                }
-            };
-
-            const timeout = setTimeout(() => done(false, 'ready wait timed out'), timeoutMs);
-            const unsubscribe = storage.subscribe(check);
-            check(); // Check current state immediately
-        });
+        return false;
     }
 }
 
-// Global singleton instance
 export const sync = new Sync();
 
-//
-// Init sequence
-//
-
-let isInitialized = false;
 export async function syncCreate(credentials: AuthCredentials) {
-    if (isInitialized) {
-        console.warn('Sync already initialized: ignoring');
-        return;
-    }
-    isInitialized = true;
-    await syncInit(credentials, false);
+    const secretBytes = decodeBase64(credentials.secret, 'base64url');
+    const encryption = await Encryption.create(secretBytes);
+    await sync.create(credentials, encryption);
 }
 
 export async function syncRestore(credentials: AuthCredentials) {
-    if (isInitialized) {
-        console.warn('Sync already initialized: ignoring');
-        return;
-    }
-    isInitialized = true;
-    await syncInit(credentials, true);
+    const secretBytes = decodeBase64(credentials.secret, 'base64url');
+    const encryption = await Encryption.create(secretBytes);
+    await sync.restore(credentials, encryption);
 }
 
-async function syncInit(credentials: AuthCredentials, restore: boolean) {
 
-    // Initialize sync engine
-    const secretKey = decodeBase64(credentials.secret, 'base64url');
-    if (secretKey.length !== 32) {
-        throw new Error(`Invalid secret key length: ${secretKey.length}, expected 32`);
-    }
-    const encryption = await Encryption.create(secretKey);
-
-    // Initialize tracking
-    initializeTracking(encryption.anonID);
-
-    // Initialize socket connection
-    const API_ENDPOINT = getServerUrl();
-    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
-
-    // Wire socket status to storage
-    apiSocket.onStatusChange((status) => {
-        storage.getState().setSocketStatus(status);
-    });
-
-    // Initialize sessions engine
-    if (restore) {
-        await sync.restore(credentials, encryption);
-    } else {
-        await sync.create(credentials, encryption);
-    }
-}

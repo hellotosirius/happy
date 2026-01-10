@@ -14,7 +14,7 @@ import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { useEntitlement, useLocalSettingMutable, useSetting } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { isUsingCustomServer } from '@/sync/serverConfig';
-import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
+import { trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { useAllMachines } from '@/sync/storage';
@@ -59,16 +59,6 @@ export const SettingsView = React.memo(function SettingsView() {
         const supported = await Linking.canOpenURL(url);
         if (supported) {
             await Linking.openURL(url);
-        }
-    };
-
-    const handleSubscribe = async () => {
-        trackPaywallButtonClicked();
-        const result = await sync.presentPaywall();
-        if (!result.success) {
-            console.error('Failed to present paywall:', result.error);
-        } else if (result.purchased) {
-            console.log('Purchase successful!');
         }
     };
 
@@ -201,10 +191,9 @@ export const SettingsView = React.memo(function SettingsView() {
             <ItemGroup>
                 <Item
                     title={t('settings.supportUs')}
-                    subtitle={isPro ? t('settings.supportUsSubtitlePro') : t('settings.supportUsSubtitle')}
+                    subtitle={t('settings.supportUsSubtitle')}
                     icon={<Ionicons name="heart" size={29} color="#FF3B30" />}
                     showChevron={false}
-                    onPress={isPro ? undefined : handleSubscribe}
                 />
             </ItemGroup>
 

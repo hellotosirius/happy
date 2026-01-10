@@ -58,12 +58,7 @@ export async function startRealtimeSession(sessionId: string, initialContext?: s
         console.log('[Voice] fetchVoiceToken response:', response);
 
         if (!response.allowed) {
-            console.log('[Voice] Not allowed, presenting paywall...');
-            const result = await sync.presentPaywall();
-            console.log('[Voice] Paywall result:', result);
-            if (result.purchased) {
-                await startRealtimeSession(sessionId, initialContext);
-            }
+            console.log('[Voice] Not allowed, voice feature requires premium subscription');
             return;
         }
 

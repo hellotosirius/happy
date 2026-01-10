@@ -7,15 +7,13 @@ import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
-import { Purchases, customerInfoToPurchases } from "./purchases";
+import { Purchases } from "./purchases";
 import { TodoState } from "../-zen/model/ops";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
 import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
 import type { PermissionMode } from '@/components/PermissionModeSelector';
-import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
-import { sync } from "./sync";
 import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/RealtimeSession';
 import { isMutableTool } from "@/components/tools/knownTools";
 import { projectManager } from "./projectManager";
@@ -104,7 +102,6 @@ interface StorageState {
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
-    applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
     applyTodos: (todoState: TodoState) => void;
     applyGitStatus: (sessionId: string, status: GitStatus | null) => void;
@@ -648,17 +645,6 @@ export const storage = create<StorageState>()((set, get) => {
                 localSettings: updatedLocalSettings
             };
         }),
-        applyPurchases: (customerInfo: CustomerInfo) => set((state) => {
-            // Transform CustomerInfo to our Purchases format
-            const purchases = customerInfoToPurchases(customerInfo);
-
-            // Always save and update - no need for version checks
-            savePurchases(purchases);
-            return {
-                ...state,
-                purchases
-            };
-        }),
         applyProfile: (profile: Profile) => set((state) => {
             // Always save and update profile
             saveProfile(profile);
@@ -1108,7 +1094,8 @@ export function useSettings(): Settings {
 }
 
 export function useSettingMutable<K extends keyof Settings>(name: K): [Settings[K], (value: Settings[K]) => void] {
-    const setValue = React.useCallback((value: Settings[K]) => {
+    const setValue = React.useCallback(async (value: Settings[K]) => {
+        const { sync } = await import('./sync');
         sync.applySettings({ [name]: value });
     }, [name]);
     const value = useSetting(name);

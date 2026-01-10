@@ -1,12 +1,5 @@
 import { en, type Translations, type TranslationStructure } from './_default';
-import { ru } from './translations/ru';
-import { pl } from './translations/pl';
-import { es } from './translations/es';
-import { it } from './translations/it';
-import { pt } from './translations/pt';
-import { ca } from './translations/ca';
 import { zhHans } from './translations/zh-Hans';
-import { ja } from './translations/ja';
 import * as Localization from 'expo-localization';
 import { loadSettings } from '@/sync/persistence';
 import { type SupportedLanguage, SUPPORTED_LANGUAGES, SUPPORTED_LANGUAGE_CODES, DEFAULT_LANGUAGE } from './_all';
@@ -73,14 +66,7 @@ export { SUPPORTED_LANGUAGES, SUPPORTED_LANGUAGE_CODES, DEFAULT_LANGUAGE, getLan
  */
 const translations: Record<SupportedLanguage, TranslationStructure> = {
     en,
-    ru, // TypeScript will enforce that ru matches the TranslationStructure type exactly
-    pl, // TypeScript will enforce that pl matches the TranslationStructure type exactly
-    es, // TypeScript will enforce that es matches the TranslationStructure type exactly
-    it, // TypeScript will enforce that it matches the TranslationStructure type exactly
-    pt, // TypeScript will enforce that pt matches the TranslationStructure type exactly
-    ca, // TypeScript will enforce that ca matches the TranslationStructure type exactly
-    'zh-Hans': zhHans, // TypeScript will enforce that zh matches the TranslationStructure type exactly
-    ja, // TypeScript will enforce that ja matches the TranslationStructure type exactly
+    'zh-Hans': zhHans,
 };
 
 // Compile-time check: ensure all supported languages have translations

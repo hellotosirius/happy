@@ -1,5 +1,4 @@
 import * as z from 'zod';
-import type { CustomerInfo } from './revenueCat/types';
 
 //
 // Schema
@@ -42,26 +41,4 @@ export function purchasesParse(purchases: unknown): Purchases {
         return { ...purchasesDefaults };
     }
     return { ...purchasesDefaults, ...parsed.data };
-}
-
-//
-// Transform CustomerInfo to Purchases
-//
-
-export function customerInfoToPurchases(customerInfo: CustomerInfo): Purchases {
-    // Extract active subscription product IDs
-    // activeSubscriptions is a record of product ID to subscription info
-    const activeSubscriptions = Object.keys(customerInfo.activeSubscriptions || {});
-
-    // Extract entitlements (entitlement_id -> isActive)
-    const entitlements: Record<string, boolean> = {};
-    const allEntitlements = customerInfo.entitlements?.all || {};
-    Object.entries(allEntitlements).forEach(([id, entitlement]) => {
-        entitlements[id] = entitlement.isActive;
-    });
-
-    return {
-        activeSubscriptions,
-        entitlements
-    };
 }
