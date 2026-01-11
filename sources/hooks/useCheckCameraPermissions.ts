@@ -5,11 +5,8 @@ export function useCheckScannerPermissions(): () => Promise<boolean> {
     const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
     return async () => {
-        if (Platform.OS === 'android') {
-            // adroid uses google code scanner which doesn't need permissions
-            return true;
-        }
-
+        // Always check and request permissions on all platforms
+        // This ensures compatibility with devices without Google services (e.g., Huawei P40)
         if (!cameraPermission) {
             // camera permissions are loading
             return false;
@@ -17,9 +14,13 @@ export function useCheckScannerPermissions(): () => Promise<boolean> {
 
         if (!cameraPermission.granted) {
             const reqRes = await requestCameraPermission();
-            return reqRes.granted;
+            if (!reqRes.granted) {
+                console.log('[CAMERA] Permission denied by user');
+                return false;
+            }
         }
 
+        console.log('[CAMERA] Permission granted');
         return true;
     }
 }

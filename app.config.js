@@ -55,7 +55,7 @@ export default {
             ],
             edgeToEdgeEnabled: true,
             package: bundleId,
-            googleServicesFile: "./google-services.json",
+            // googleServicesFile removed for non-GMS devices (Huawei P40)
             intentFilters: variant === 'production' ? [
                 {
                     "action": "VIEW",
@@ -163,12 +163,12 @@ export default {
                 root: "./sources/app"
             },
             eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
+                projectId: "50317906-3c9f-46a0-9497-f77459971437"
             },
             app: {
                 postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY
             }
         },
-        owner: "bulkacorp"
+        owner: "smileok2006"
     }
 };

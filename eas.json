@@ -28,6 +28,9 @@
       "channel": "preview",
       "env": {
         "APP_ENV": "preview"
+      },
+      "android": {
+        "buildType": "apk"
       }
     },
     "preview-store": {

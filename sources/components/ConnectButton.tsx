@@ -7,7 +7,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { t } from '@/text';
 
 export const ConnectButton = React.memo(() => {
-    const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal();
+    const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal({
+        onSuccess: () => {
+            console.log('[ConnectButton] Connection successful, refreshing UI...');
+            // Success callback - the modal will be dismissed and sync will refresh
+        }
+    });
     const [manualUrl, setManualUrl] = React.useState('');
     const [showManualEntry, setShowManualEntry] = React.useState(false);
 
@@ -19,8 +24,9 @@ export const ConnectButton = React.memo(() => {
     const handleManualConnect = async () => {
         if (manualUrl.trim()) {
             trackConnectAttempt();
-            connectWithUrl(manualUrl.trim());
+            await connectWithUrl(manualUrl.trim());
             setManualUrl('');
+            setShowManualEntry(false);
         }
     };
 
