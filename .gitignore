@@ -45,3 +45,9 @@ yarn-error.*
 CLAUDE.local.md
 
 .dev/worktree/*
+
+# build logs
+.build-logs/
+
+# temporary files
+nul
