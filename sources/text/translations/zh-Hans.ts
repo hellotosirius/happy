@@ -59,6 +59,7 @@ export const zhHans: TranslationStructure = {
         fileViewer: '文件查看器',
         loading: '加载中...',
         retry: '重试',
+        grantPermission: '授予权限',
     },
 
     profile: {
@@ -661,6 +662,7 @@ export const zhHans: TranslationStructure = {
         disconnect: '断开连接',
         failedToConnectTerminal: '连接终端失败',
         cameraPermissionsRequiredToConnectTerminal: '连接终端需要相机权限',
+        scanQRCodeToConnect: '扫描二维码以连接',
         failedToLinkDevice: '链接设备失败',
         cameraPermissionsRequiredToScanQr: '扫描二维码需要相机权限',
         failedToOpenCamera: '无法打开相机。请在系统设置中检查相机权限。',

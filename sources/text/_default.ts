@@ -57,6 +57,7 @@ export const en = {
         fileViewer: 'File Viewer',
         loading: 'Loading...',
         retry: 'Retry',
+        grantPermission: 'Grant Permission',
     },
 
     profile: {
@@ -662,6 +663,7 @@ export const en = {
         failedToLinkDevice: 'Failed to link device',
         cameraPermissionsRequiredToScanQr: 'Camera permissions are required to scan QR codes',
         failedToOpenCamera: 'Failed to open camera. Please check camera permissions in system settings.',
+        scanQRCodeToConnect: 'Scan QR code to connect',
     },
 
     navigation: {

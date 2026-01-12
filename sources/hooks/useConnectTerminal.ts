@@ -40,8 +40,24 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
 
             console.log('[AUTH] Terminal connected successfully, triggering sync...');
 
-            // Trigger sync to refresh device list
+            // Trigger immediate sync to refresh device list
             await sync.refreshMachines();
+
+            // Wait for the device to become active with retry logic
+            // This gives the terminal time to establish connection and update its status
+            console.log('[AUTH] Waiting for device to become active...');
+
+            let retryCount = 0;
+            const maxRetries = 3;
+            const retryDelay = 3000; // 3 seconds between retries
+
+            while (retryCount < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                await sync.refreshMachines();
+
+                retryCount++;
+                console.log(`[AUTH] Device list refreshed (attempt ${retryCount}/${maxRetries})`);
+            }
 
             // Show success message and call onSuccess callback
             Modal.alert(t('common.success'), t('modals.terminalConnectedSuccessfully'), [
@@ -73,12 +89,33 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
         }
 
         try {
-            console.log('[SCANNER] Launching barcode scanner...');
-            // Use camera scanner
-            await CameraView.launchScanner({
-                barcodeTypes: ['qr']
-            });
-            console.log('[SCANNER] Scanner launched successfully');
+            console.log('[SCANNER] Checking modern scanner availability...');
+
+            // Check if modern scanner is available
+            if (CameraView.isModernBarcodeScannerAvailable) {
+                console.log('[SCANNER] Using modern scanner API...');
+                await CameraView.launchScanner({
+                    barcodeTypes: ['qr']
+                });
+                console.log('[SCANNER] Modern scanner launched successfully');
+            } else {
+                console.log('[SCANNER] Modern scanner not available, using fallback scanner...');
+                // Use fallback scanner for devices without modern scanner support (e.g., Huawei P40)
+                const { FallbackQRScanner } = await import('@/components/FallbackQRScanner');
+
+                const modalId = Modal.show({
+                    component: FallbackQRScanner,
+                    props: {
+                        onScanned: async (data: string) => {
+                            Modal.hide(modalId);
+                            await processAuthUrl(data);
+                        },
+                        onClose: () => {
+                            Modal.hide(modalId);
+                        }
+                    }
+                });
+            }
         } catch (error) {
             console.error('[SCANNER] Failed to launch scanner:', error);
             Modal.alert(
@@ -87,7 +124,7 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
                 [{ text: t('common.ok') }]
             );
         }
-    }, [checkScannerPermissions]);
+    }, [checkScannerPermissions, processAuthUrl]);
 
     const connectWithUrl = React.useCallback(async (url: string) => {
         return await processAuthUrl(url);
