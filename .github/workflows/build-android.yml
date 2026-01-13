@@ -1,0 +1,55 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Build profile'
+        required: true
+        default: 'huawei'
+        type: choice
+        options:
+          - huawei
+          - preview
+          - production
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Parse changelog
+        run: yarn tsx sources/scripts/parseChangelog.ts
+
+      - name: Run type check
+        run: yarn typecheck
+
+      - name: Build Android APK
+        run: eas build --platform android --profile ${{ github.event.inputs.profile }} --non-interactive --no-wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Wait for build completion
+        run: |
+          echo "Build started. Check status at: https://expo.dev/accounts/[your-account]/projects/happy/builds"
+          echo "Download APK from Expo dashboard after build completes."
